@@ -17,7 +17,7 @@ Future plans include parsing property key/value pairs on the command line.
 You need to have [CMake](https://cmake.org/) built and installed. If you are running Debian or Ubuntu, install the following packages (provided as a bash command for copy-paste convenience):
 
 ```bash
-sudo apt install -y cmake libgstrtspserver-1.0-dev libglib2.0-dev libgstreamer1.0-dev
+sudo apt install -y cmake libglib2.0-dev libgstreamer1.0-dev
 ```
 
 Go to the source directory and run:
