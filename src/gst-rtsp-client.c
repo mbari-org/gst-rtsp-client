@@ -1073,6 +1073,29 @@ clear_winmm_timer_resolution (guint resolution)
 #endif
 
 
+#include <gst/rtp/gstrtpdefs.h>
+
+static gboolean select_AVPF(
+	GstElement *rtspsrc, guint idx,
+	GstCaps *caps, gpointer udata)
+{
+	g_print("connected stream %d from %s\n",
+		idx, GST_ELEMENT_NAME(rtspsrc));
+
+	int size = gst_caps_get_size(caps);
+	g_print("caps size = %d\n", size);
+
+	if (size > 0) {
+		const GstStructure* structure = gst_caps_get_structure(caps, 0);
+
+		g_print("parse first sturcture %s has %d fields\n",
+			gst_structure_get_name(structure), gst_structure_n_fields(structure));
+
+		g_print("%s\n", gst_structure_to_string(structure));
+	}
+	return idx != 0;
+}
+
 static void
 tweakJitterBuffer(GstElement *manager, GstElement *buffer,
                   guint sessionId, guint ssrc)
@@ -1083,9 +1106,10 @@ tweakJitterBuffer(GstElement *manager, GstElement *buffer,
   gint32 rtxMinDelay, rtxDelayReorder, rtxMinRetryTimeout;
 
   g_object_set(G_OBJECT (buffer),
-    "rtx-min-delay", 1200,     //declare lost only after >1200ms late
+    "rtx-min-delay", 1200,   //declare lost only after >1200ms late
     "rtx-delay-reorder", 1000, //don't declare misordered "lost" until >1000ms
-    "rtx-min-retry-timeout", 250,  //re-request no faster than once every 250ms
+    "rtx-min-retry-timeout", 350,  //re-request no faster than once every 250ms
+    "rtx-max-retries", 9,
   NULL);
   g_object_get(G_OBJECT (buffer),
     "rtx-min-delay", &rtxMinDelay,
@@ -1122,8 +1146,10 @@ connectManager(GstElement *pipeline, char *rtspSrcName)
  */
 {
   GstElement *src = gst_bin_get_by_name(GST_BIN(pipeline), rtspSrcName);
-  if(src)
+  if(src) {
     g_signal_connect(src, "new-manager", G_CALLBACK(newSrcManager), NULL);
+    g_signal_connect(src, "select-stream", G_CALLBACK(select_AVPF), NULL);
+  }
 }
 
 
