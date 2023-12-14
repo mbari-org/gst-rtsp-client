@@ -1,0 +1,19 @@
+#!/bin/sh
+#view remote webcam
+url=${1-espshore.mbari.org:2558/video}
+#: ${GST_DEBUG:=6}
+: ${GST_DEBUG:=4,video-info:1,rtph265depay:2}
+export GST_DEBUG
+
+#note:  If retry count >=8 repeatedly, RTX retransmit requests are
+#       likely not getting thru the H150 modem link.  To fix:
+#       Reset modem or simply ping backseat a few times from behind the H150
+#
+#gdb --args
+exec gst-rtsp-client --set=src.1@max-misorder-time=4000@\
+rtx-min-delay=1200,rtx-delay-reorder=1000,\
+rtx-min-retry-timeout=350,rtx-max-retries=9\
+ rtspsrc name=src location=rtsp://$url do-retransmission=true latency=${2-5000}\
+   connection-speed=100 ! rtph265depay ! decodebin ! autovideosink #2>&1|
+grep "Request RTX"
+grep -i retransmission
