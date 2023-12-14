@@ -5,6 +5,9 @@
  *
  * gst-launch.c: tool to launch GStreamer pipelines from the command line
  *
+ * revised:  12/13/23 brent@mbari.org
+ *  -- added ability to alter rtsp manager and jitterbuffer elements of rtspsrc
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
  * License as published by the Free Software Foundation; either
@@ -78,6 +81,7 @@ static gboolean toc = FALSE;
 static gboolean messages = FALSE;
 static gboolean eos_on_shutdown = FALSE;
 static gchar **exclude_args = NULL;
+static gchar **setArgs = NULL;
 
 /* pipeline status */
 static gboolean is_live = FALSE;
@@ -1075,10 +1079,11 @@ clear_winmm_timer_resolution (guint resolution)
 
 #include <gst/rtp/gstrtpdefs.h>
 
-static gboolean select_AVPF(
+static gboolean selectStream(
 	GstElement *rtspsrc, guint idx,
-	GstCaps *caps, gpointer udata)
+	GstCaps *caps, gpointer selected)
 {
+#if 0
 	g_print("connected stream %d from %s\n",
 		idx, GST_ELEMENT_NAME(rtspsrc));
 
@@ -1093,63 +1098,104 @@ static gboolean select_AVPF(
 
 		g_print("%s\n", gst_structure_to_string(structure));
 	}
-	return idx != 0;
+#endif
+	return idx == (size_t)selected;
+}
+
+static gboolean
+set1prop(GQuark field, const GValue *value, gpointer el)
+{
+  g_object_set_property(el, g_quark_to_string(field), value);
+  return TRUE;
+}
+
+static gboolean
+setProps(GstElement *el, const char *properties)
+/*
+ * set properties of el listed in format prop1=value1,prop2=value2,...
+ */
+{
+#define PROPprefix "props," //arbitrary name for our new GstStructure
+  gchar *structTxt = malloc(sizeof(PROPprefix) + strlen(properties));
+  memcpy(structTxt, PROPprefix, sizeof(PROPprefix)-1);
+  strcpy(structTxt+sizeof(PROPprefix)-1, properties);
+  gchar *end;
+  GstStructure *props = gst_structure_from_string(structTxt, &end);
+  if (!props) {
+    GST_ERROR_OBJECT(el, "invalid property list: \"%s\"\n", properties);
+    return FALSE;
+  }
+  gst_structure_foreach(props, set1prop, el);
+  if(*end)
+    GST_WARNING_OBJECT(el, "ignored junk after properties: \"%s\"\n", end);
+  gst_structure_free (props);
+  free(structTxt);
+  return TRUE;
 }
 
 static void
 tweakJitterBuffer(GstElement *manager, GstElement *buffer,
-                  guint sessionId, guint ssrc)
+                  guint sessionId, guint ssrc, gpointer props)
 /*
  * update rtspsrc's JitterBuffer configuration
  */
 {
-  gint32 rtxMinDelay, rtxDelayReorder, rtxMinRetryTimeout;
-
-  g_object_set(G_OBJECT (buffer),
-    "rtx-min-delay", 1200,   //declare lost only after >1200ms late
-    "rtx-delay-reorder", 1000, //don't declare misordered "lost" until >1000ms
-    "rtx-min-retry-timeout", 350,  //re-request no faster than once every 250ms
-    "rtx-max-retries", 9,
-  NULL);
-  g_object_get(G_OBJECT (buffer),
-    "rtx-min-delay", &rtxMinDelay,
-    "rtx-delay-reorder", &rtxDelayReorder,
-    "rtx-min-retry-timeout", &rtxMinRetryTimeout,
-  NULL);
-  GST_INFO_OBJECT(buffer,
-    "rtx-[min-delay/delay-reorder]:%dms/%dms, min-retry-timeout:%d\n",
-  rtxMinDelay, rtxDelayReorder, rtxMinRetryTimeout);
+  setProps(buffer, (char *)props);
 }
 
 static void
-newSrcManager(GstElement *src, GstElement *manager)
+newSrcManager(GstElement *src, GstElement *manager, gpointer props)
 /*
  * install callback to be called just after jitterbuffer is configured
  */
 {
-  guint32 maxDisorder;
-  g_object_set(G_OBJECT (manager),
-    "max-misorder-time", 4000,
-  NULL);
-  g_object_get(G_OBJECT (manager),
-    "max-misorder-time", &maxDisorder,
-  NULL);
-  GST_INFO_OBJECT(manager, "max-misorder-time:%dms\n", maxDisorder);
-  g_signal_connect(manager, "new-jitterbuffer",
-        G_CALLBACK(tweakJitterBuffer), NULL);
+  char *mgrProps = props;
+  char *c = mgrProps;
+  while (*c && *c!='@') c++;
+  if (*c) {
+    g_signal_connect(manager, "new-jitterbuffer",
+        G_CALLBACK(tweakJitterBuffer), c+1);
+  }
+  if (c != mgrProps) {
+    *c = 0;  //terminate manager properties at first '@'
+    setProps(manager, mgrProps);
+  }
 }
 
 static void
-connectManager(GstElement *pipeline, char *rtspSrcName)
+parseSetArg (GstElement *pipeline, char *arg)
 /*
- * install callback on rtspsrc element named rtspSrcName
+ * parse given setArg string
  */
-{
-  GstElement *src = gst_bin_get_by_name(GST_BIN(pipeline), rtspSrcName);
-  if(src) {
-    g_signal_connect(src, "new-manager", G_CALLBACK(newSrcManager), NULL);
-    g_signal_connect(src, "select-stream", G_CALLBACK(select_AVPF), NULL);
+{ //find end of rtspsrc's name
+  char *c = arg;
+  while (*c && *c!='.' && *c!='@') c++;
+  char term = *c; *c = 0;
+  GstElement *src = gst_bin_get_by_name(GST_BIN(pipeline), arg);
+  if(!src) {
+    GST_WARNING_OBJECT(pipeline, "contains no element named \"%s\"\n", arg);
+    return;
   }
+  if (term == '.') {  //parse index of stream to select later
+    char *idxTxt = ++c;
+    unsigned long idx = strtoul(idxTxt, &c, 10);
+    if (!*c || *c == '@')
+      g_signal_connect(src, "select-stream",
+                       G_CALLBACK(selectStream), (void *)idx);
+    else
+      GST_WARNING_OBJECT(src, "Ignored invalid stream \"%s\"\n", idxTxt);
+  }
+  switch (*c) {
+    case 0:
+      return;
+    case '@':
+      c++;
+      break;
+    default:
+      GST_WARNING_OBJECT(src, "Expected '@' after %s\n", arg);
+      return;
+  }
+  g_signal_connect(src, "new-manager", G_CALLBACK(newSrcManager), c);
 }
 
 
@@ -1178,9 +1224,9 @@ real_main (int argc, char *argv[])
     {"messages", 'm', 0, G_OPTION_ARG_NONE, &messages,
         N_("Output messages"), NULL},
     {"exclude", 'X', 0, G_OPTION_ARG_STRING_ARRAY, &exclude_args,
-          N_("Do not output status information for the specified property "
-              "if verbose output is enabled (can be used multiple times)"),
-        N_("PROPERTY-NAME")},
+          N_("Do not output status information for the specified PROPERTY\n"
+"\t\t\t\t      if verbose output is enabled (can be used multiple times)"),
+        N_("PROPERTY")},
     {"no-fault", 'f', 0, G_OPTION_ARG_NONE, &no_fault,
         N_("Do not install a fault handler"), NULL},
     {"eos-on-shutdown", 'e', 0, G_OPTION_ARG_NONE, &eos_on_shutdown,
@@ -1191,16 +1237,16 @@ real_main (int argc, char *argv[])
 #endif
     GST_TOOLS_GOPTION_VERSION,
     {"no-position", '\0', 0, G_OPTION_ARG_NONE, &no_position,
-        N_("Do not print current position of pipeline. "
-              "If this option is unspecified, the position will be printed "
-              "when stdout is a TTY. "
-              "To enable printing position when stdout is not a TTY, "
-              "use \"force-position\" option"), NULL},
+        N_("Do not print current position of pipeline (even on TTY)"), NULL},
     {"force-position", '\0', 0, G_OPTION_ARG_NONE, &force_position,
-          N_("Allow printing current position of pipeline even if "
-              "stdout is not a TTY. This option has no effect if "
-              "the \"no-position\" option is specified"),
-        NULL},
+        N_("Print current position (unless no-position also specified)"),NULL},
+    {"set", 's', 0, G_OPTION_ARG_STRING_ARRAY, &setArgs,
+        N_("Set properties of RTSP session managers and jitterbuffers.\n\nExample:\n"
+"$ gst-rtsp-client --set=src.1@max-misorder-time=4000@rtx-min-delay=1200,\\\n"
+"rtx-delay-reorder=1000,rtx-min-retry-timeout=350,rtx-max-retries=9\n\n"
+"Above selects 2nd stream of rtspsrc element named 'src',\n"
+"  then sets 1 property of its rtpbin and 4 of its jitterbuffer\n"
+"(The '.1' after 'src' above could be omitted to select all streams)"), NULL},
     {NULL}
   };
   GOptionContext *ctx;
@@ -1235,7 +1281,7 @@ real_main (int argc, char *argv[])
   g_setenv ("GST_XINITTHREADS", "1", TRUE);
 
 #ifndef GST_DISABLE_OPTION_PARSING
-  ctx = g_option_context_new ("PIPELINE-DESCRIPTION");
+  ctx = g_option_context_new ("PIPELINE-DESCRIPTION  # 12/13/23 brent@mbari.org");
   g_option_context_add_main_entries (ctx, options, GETTEXT_PACKAGE);
   g_option_context_add_group (ctx, gst_init_get_option_group ());
 #ifdef G_OS_WIN32
@@ -1293,7 +1339,8 @@ real_main (int argc, char *argv[])
     return 1;
   }
 
-  connectManager(pipeline, "rtspsrc");
+  if (setArgs) for(char **set=setArgs; *set; set++)
+    parseSetArg(pipeline, *set);
 
   loop = g_main_loop_new (NULL, FALSE);
 
