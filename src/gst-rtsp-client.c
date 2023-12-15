@@ -5,7 +5,7 @@
  *
  * gst-launch.c: tool to launch GStreamer pipelines from the command line
  *
- * revised:  12/13/23 brent@mbari.org
+ * revised:  12/14/23 brent@mbari.org
  *  -- added ability to alter rtsp manager and jitterbuffer elements of rtspsrc
  *
  * This library is free software; you can redistribute it and/or
@@ -1116,21 +1116,22 @@ setProps(GstElement *el, const char *properties)
  */
 {
 #define PROPprefix "props," //arbitrary name for our new GstStructure
+  gboolean result = FALSE;
   gchar *structTxt = malloc(sizeof(PROPprefix) + strlen(properties));
   memcpy(structTxt, PROPprefix, sizeof(PROPprefix)-1);
   strcpy(structTxt+sizeof(PROPprefix)-1, properties);
   gchar *end;
   GstStructure *props = gst_structure_from_string(structTxt, &end);
-  if (!props) {
-    GST_ERROR_OBJECT(el, "invalid property list: \"%s\"\n", properties);
-    return FALSE;
-  }
-  gst_structure_foreach(props, set1prop, el);
-  if(*end)
-    GST_WARNING_OBJECT(el, "ignored junk after properties: \"%s\"\n", end);
-  gst_structure_free (props);
+  if (props) {
+    gst_structure_foreach(props, set1prop, el);
+    if(*end)
+      GST_WARNING_OBJECT(el, "ignored junk after properties: \"%s\"\n", end);
+    gst_structure_free (props);
+    result = TRUE;
+  }else
+    GST_ERROR_OBJECT(el, "invalid property list: %s\n", properties);
   free(structTxt);
-  return TRUE;
+  return result;
 }
 
 static void
@@ -1281,7 +1282,7 @@ real_main (int argc, char *argv[])
   g_setenv ("GST_XINITTHREADS", "1", TRUE);
 
 #ifndef GST_DISABLE_OPTION_PARSING
-  ctx = g_option_context_new ("PIPELINE-DESCRIPTION  # 12/13/23 brent@mbari.org");
+  ctx = g_option_context_new ("PIPELINE-DESCRIPTION  # 12/14/23 brent@mbari.org");
   g_option_context_add_main_entries (ctx, options, GETTEXT_PACKAGE);
   g_option_context_add_group (ctx, gst_init_get_option_group ());
 #ifdef G_OS_WIN32
